@@ -159,13 +159,13 @@ def resample_data(df, date_column, freq='ME'):
     return df
 
 def read_climate_index(filepath):
-    df = pd.read_csv(filepath, sep='\s+')
+    df = pd.read_csv(f'data/{filepath}', sep='\s+')
     df['dates'] = [convert_decimal_year(d) for d in df['dates']]
     df['dates'] = pd.to_datetime(df['dates'])
     df.set_index('dates', inplace=True)
     return df
 
-df_rad = pd.read_csv('dataexport_20241204T120753.csv',sep=',')
+df_rad = pd.read_csv('data/dataexport_20241204T120753.csv',sep=',')
 dates = np.array(df_rad['Date'])
 rad_val = np.array(df_rad['rad_val'])
 
@@ -223,7 +223,7 @@ df_envelope = pd.DataFrame({
 df_envelope_monthly = resample_data(df_envelope, 'Dates')
 
 # 3. Прилив
-df_tide = pd.read_csv('LOD_zonal.dat',sep='\s+')
+df_tide = pd.read_csv('data/LOD_zonal.dat',sep='\s+')
 
 dates_tide = np.array(df_tide['year'])
 dates_tide_slice = dates_tide[87658:118662]
@@ -242,7 +242,7 @@ sine_tide = fit_sin(k, tide_lod)['fitfunc']
 
 print(fit_sin(k, tide_omega))
 
-true_omega = pd.read_csv("true_lod.dat", sep='\s+')
+true_omega = pd.read_csv("data/true_lod.dat", sep='\s+')
 
 true_omega_values = np.array(-true_omega['lod'])[:23009]
 true_omega_dates = np.array(dates_tide[95694:118703])
@@ -292,7 +292,7 @@ print(mannwhitneyu(max_tide_envelope, min_tide_envelope))
 print(wilcoxon(max_tide_envelope, min_tide_envelope[:-1]))
 
 # 4. Осадки
-precipitation = pd.read_csv('Atm_Temp_Osadki.dat', sep=' ')
+precipitation = pd.read_csv('data/Atm_Temp_Osadki.dat', sep=' ')
 
 dates_precip = np.array(precipitation['dates'])
 dates_precip_tide = dates_tide[np.where(dates_tide == 1996.84096)[0][0]:np.where(dates_tide == 2024.74812)[0][0]]
@@ -320,13 +320,13 @@ max_pressure = np.array([pressure[i] if i in max_pressure_indices else 0 for i i
 
 h_shifted = np.roll(h, 13) + np.roll(h, -13)
 
-pant_smooth = pd.read_csv('27-29pantsmoothT.dat', sep=' ')
+pant_smooth = pd.read_csv('data/27-29pantsmoothT.dat', sep=' ')
 pant_smooth_temp = np.append(np.array(pant_smooth.iloc[:, 3]), 2.0)
 pant_smooth_temp_daily = averaged_by_interval(pant_smooth_temp, 8)
 
 # 5. Длительность дня
 
-length_of_day = pd.read_csv('sunsetrise_fixed.txt',sep='\s+')
+length_of_day = pd.read_csv('data/sunsetrise_fixed.txt',sep='\s+')
 
 JD_length_of_day = length_of_day['JD']
 len_of_day = calculate_length_of_day(JD_length_of_day)
@@ -394,7 +394,7 @@ crosscor_tide_temp_specter, crosscor_tide_temp_omega = ampl_fft(crosscor_tide_te
 
 # 10. Любушин
 
-intensities = pd.read_csv("Intensity_Shares_cleaned.dat", sep='\s+', header=None)
+intensities = pd.read_csv("data/Intensity_Shares_cleaned.dat", sep='\s+', header=None)
 
 plt.figure(1)
 plt.plot(df_rad.index, df_rad['rad_val'])

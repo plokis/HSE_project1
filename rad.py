@@ -6,195 +6,42 @@ from scipy.signal import argrelextrema
 from scipy.stats import kstest, ks_2samp, mannwhitneyu, wilcoxon
 from seaborn import histplot, heatmap
 
-def compute_acf_numpy(signal1, signal2):
-    n = len(signal1)
-    acf = np.zeros(n)
-    for tau in range(1, n + 1):
-        acf[tau - 1] = np.sum(signal1[:n - tau + 1] * signal2[tau - 1:n]) / n
-    return acf
+# Импорт собственных модулей
+from analysis.utils import averaged_by_interval, calculate_length_of_day, split_data
+from analysis.filters import moving_average, pantelleev_filter, manual_convolution
+from analysis.spectral import compute_acf_numpy, ampl_fft
+from analysis.fitting import fit_sin
+from analysis.preprocessing import resample_data, read_climate_index, convert_localextr_to_stochastic_process
+from analysis.plotting import (
+    plot_rad_timeseries, plot_detrended_with_envelope, plot_filter_shape, plot_autocorrelation,
+    plot_rad_spectrum_half, plot_rad_spectrum_log, plot_tide_spectrum, plot_detrended_rad_spectrum,
+    plot_envelope_spectrum, plot_envelope_autocorr, plot_envelope_power, plot_ccf_spectrum,
+    plot_ccf_spectrum_rad, plot_ccf_spectrum_temp, plot_indices_panel, plot_precip_raw,
+    plot_temp_detrended, plot_temp_periodogram, plot_temp_with_fit, plot_filtered_temp,
+    plot_envelope_over_lod, plot_detrended_vs_lod, plot_correlation_matrix, plot_crosscorr_series,
+    plot_intensities_panel, show_all
+)
 
-def convert_decimal_year(decimal_year):
-    year = int(decimal_year)  # Целая часть — это год
-    month = int(np.ceil((decimal_year - year + 0.01) * 12))  # Доля года * 12 → номер месяца
-    month = max(1, min(month, 12))  # Гарантируем, что месяц в диапазоне 1–12
-    return f"{year:04d}-{month:02d}"
-
-def averaged_by_interval(time_series, interval):
-    return np.mean(time_series.reshape(-1, interval), axis=1)
-
-def moving_average(data, window_size):
-    return np.convolve(data, np.ones(window_size)/window_size, mode='same')
-
-def manual_convolution(array, kernel):
-    array_len = len(array)
-    kernel_len = len(kernel)
-    pad_width = kernel_len // 2
-    padded_array = np.pad(array, pad_width, mode='edge')  # Паддинг с повторением краёв
-    result = np.zeros_like(array)
-
-    for j in range(array_len):
-        result[j] = np.sum(padded_array[j:j + kernel_len] * kernel)
-
-    return result
-
-def pantelleev_filter(t, omega_0: float):
-    """
-    Вычисляет значение функции h(t) по формуле Pantelleev filter.
-
-    :param t: Число или массив значений времени t.
-    :param omega_0: Параметр частоты (по умолчанию 1).
-    :return: Значение h(t).
-    """
-    t = np.asarray(t)  # Преобразуем t в массив, если он не является массивом
-    exp_term = np.exp(-omega_0 * np.abs(t) / np.sqrt(2))
-    cos_term = (3 / np.sqrt(2)) * np.cos(omega_0 * t / np.sqrt(2))
-    sin_term = (omega_0 * np.abs(t) + 3 / np.sqrt(2)) * np.sin(omega_0 * np.abs(t) / np.sqrt(2))
-
-    h_t = (omega_0 / 8) * exp_term * (cos_term + sin_term)
-    return h_t
-
-def fit_sin(tt, yy):
-    tt = np.array(tt)
-    yy = np.array(yy)
-    ff = np.fft.fftfreq(len(tt), (tt[1]-tt[0]))   # assume uniform spacing
-    Fyy = abs(np.fft.fft(yy))
-    guess_freq = abs(ff[np.argmax(Fyy[1:])+1])   # excluding the zero frequency "peak", which is related to offset
-    guess_amp = np.std(yy) * 2.**0.5
-    guess_offset = np.mean(yy)
-    guess = np.array([guess_amp, 2.*np.pi*guess_freq, 0., guess_offset])
-
-    def sinfunc(t, A, w, p, c):  return A * np.sin(w*t + p) + c
-    popt, pcov = scipy.optimize.curve_fit(sinfunc, tt, yy, p0=guess)
-    A, w, p, c = popt
-    f = w/(2.*np.pi)
-    fitfunc = lambda t: A * np.sin(w*t + p) + c
-    return {"amp": A, "omega": w, "phase": p, "offset": c, "freq": f, "period": 1./f, "fitfunc": fitfunc, "maxcov": np.max(pcov), "rawres": (guess,popt,pcov)}
-
-def ampl_fft(signal):
-    """
-    Performs spectrum analysis of a signal.
-
-    Parameters:
-    - signal: 1D numpy array of complex signal values
-
-    Returns:
-    - spectr: array of spectrum values (complex)
-    - freq: corresponding frequencies (Hz)
-    """
-
-    N = signal.shape[0]
-    T = 0.00273
-
-    m = signal.copy()
-
-    spectr = np.fft.fftn(m)
-
-    # Расчёт частот вручную, как в оригинальной функции
-    omega = np.zeros(N)
-    t = np.zeros(N)
-
-    for k in range(N):
-        if k == 0:
-            t[k] = 0
-            omega[k] = 0
-        elif k <= N // 2:
-            t[k] = N * T / (k)
-            omega[k] = 2 * np.pi / t[k]
-        else:
-            t[k] = N * T / (N - k)
-            omega[k] = -2 * np.pi / t[k]
-
-    # Преобразуем в частоты в Гц (omega / 2π)
-    freq = omega / (2 * np.pi)
-
-    # Сдвиг аналогичный MATLAB circshift
-    shift = [1, N // 2 - 1]  # [2, floor(N/2)] в MATLAB (индексация с 1)
-    freq = np.roll(freq, shift[1])
-    freq = np.roll(freq, shift[0])
-    spectr = np.roll(spectr, shift[1])
-    spectr = np.roll(spectr, shift[0]) / N
-
-    return spectr, freq
-
-def split_data(data):
-    # data = data.tolist()
-    s01, s02 = [], []
-    chunk01 = data[:77]
-    s01 = np.concatenate([s01,chunk01])
-    for i in range(len(data) // 365 + 100):
-        chunk1 = data[i * 365 + 265:i * 365 + 265 + 100 + 77]
-        s01 = np.concatenate([s01,chunk1])
-    for i in range(len(data) // 365):
-        chunk2 = data[i * 365 + 77:i * 365 + 265]
-        s02 = np.concatenate([s02,chunk2])
-    s1 = np.array(s01)
-    s2 = np.array(s02)
-    return s1, s2
-
-def calculate_length_of_day(jd):
-    jd = np.array(jd)
-    len_of_day = np.zeros((len(jd)-1)//2)
-    for j in range(0,len(jd)-1,2):
-        len_of_day[j//2] = jd[j+1] - jd[j]
-    return len_of_day
-
-def convert_localextr_to_stochastic_process(level: float,
-                                            dates_input: np.ndarray,
-                                            values_input: np.ndarray,
-                                            file_name: str) -> None:
-    filtered_values = np.array([1 if x >= level else 0 for x in values_input])
-    indices = np.where(filtered_values == 1)[0]
-    stoch_proc = pd.DataFrame({
-        'dates': dates_input[indices],
-        'values': filtered_values[indices]
-    })
-
-    stoch_proc.to_csv(file_name, header=False, index=False, sep=' ')
-
-def resample_data(df, date_column, freq='ME'):
-    df[date_column] = pd.to_datetime(df[date_column])
-    df.set_index(date_column, inplace=True)
-    df = df.resample(freq).mean()
-    df.index = df.index.to_period('M').to_timestamp()
-    return df
-
-def read_climate_index(filepath):
-    df = pd.read_csv(f'data/{filepath}', sep='\s+')
-    df['dates'] = [convert_decimal_year(d) for d in df['dates']]
-    df['dates'] = pd.to_datetime(df['dates'])
-    df.set_index('dates', inplace=True)
-    return df
-
-df_rad = pd.read_csv('data/dataexport_20241204T120753.csv',sep=',')
+# ----------------------
+# 1. ДАННЫЕ ПСИ
+# ----------------------
+df_rad = pd.read_csv('data/dataexport_20241204T120753.csv', sep=',')
 dates = np.array(df_rad['Date'])
 rad_val = np.array(df_rad['rad_val'])
-
 df_rad_monthly = resample_data(df_rad, 'Date')
 
-print(np.where(dates == '2023-01-01')[0], np.where(dates == '2024-07-14')[0])
-
-dt = 0.00274
 k = np.arange(0, len(dates))
-k_m = np.arange(0, len(df_rad_monthly['rad_val']))
-
 res = fit_sin(k, rad_val)
-print(res)
-
-sine_df = pd.DataFrame({
-    'date': dates,
-    'value': res['fitfunc'](k)
-})
-
+sine_df = pd.DataFrame({'date': dates, 'value': res['fitfunc'](k)})
 sine_df_monthly = resample_data(sine_df, 'date')
-
 detrended_rad = rad_val - res['fitfunc'](k)
 # detrended_rad_monthly = df_rad_monthly['rad_val'] - res['fitfunc'](k_m)
 
 print(len(detrended_rad))
 
+# Автокорреляция ПСИ
 autocor = compute_acf_numpy(detrended_rad - np.mean(detrended_rad),
                             detrended_rad - np.mean(detrended_rad))
-
 # 1. Два суб ряда
 winter_dates, summer_dates = split_data(dates)
 winter_data, summer_data = split_data(detrended_rad)
@@ -253,7 +100,7 @@ max_true_omega_indices = argrelextrema(true_omega_values, np.greater, order=5)[0
 convert_localextr_to_stochastic_process(-1.0,
                                         true_omega_dates[max_true_omega_indices],
                                         true_omega_values[max_true_omega_indices],
-                                        'true_omega_max.dat')
+                                        'data/true_omega_max.dat')
 
 print(len(upper_envelope), detrended_rad)
 
@@ -396,299 +243,80 @@ crosscor_tide_temp_specter, crosscor_tide_temp_omega = ampl_fft(crosscor_tide_te
 
 intensities = pd.read_csv("data/Intensity_Shares_cleaned.dat", sep='\s+', header=None)
 
-plt.figure(1)
-plt.plot(df_rad.index, df_rad['rad_val'])
-# plt.plot(sine_df)
-plt.xlabel('Даты')
-plt.ylabel('Мера солнечного излучения, Вт/м2')
-plt.title("ПСИ в городе Базель, Швейцария")
-plt.grid()
+# ----------------------
+# 7. ГРАФИКИ
+# ----------------------
+# 1
+plot_rad_timeseries(df_rad, sine_df, fig=1)
+# 2 и 12 (вторая — более детальная с огибающей свёрткой)
+plot_detrended_with_envelope(df_envelope.index, np.abs(detrended_rad), abs_envelope_conv, fig=2)
+plot_detrended_with_envelope(df_envelope.index, np.abs(detrended_rad), abs_envelope_conv, fig=12,
+                             title='Данные вместе с огибающими')
 
-plt.figure(2)
-plt.plot(df_tide.index, np.abs(df_rad['rad_val'] - sine_df['value']), label='Данные солнечного излучения без годового тренда')
-# plt.plot(df_tide.index, df_tide['tide'])
-# plt.plot(500*(sine_tide(k)))
-# plt.plot(dates[30314:30874], 7800*len_of_day-2000, label='Продолжительность дня')
-plt.plot(df_tide.index, abs_envelope, label='Огибающая')
-# plt.xticks([dates[120*i] for i in range(258)])
-plt.legend(loc='best')
-plt.grid()
+# 3,4,5,6
+half = slice(len(omega_rad)//2, None)
+plot_rad_spectrum_half(res['period'] / omega_rad[half], specter_rad[half], fig=3)
+plot_rad_spectrum_log(365.25/omega_rad, specter_rad, fig=4, title=None)
+plot_tide_spectrum(res['period']/omega_tide, specter_tide, fig=5,
+                   title='Спектры прилива солнечного излучения и лунного прилива')
+plot_detrended_rad_spectrum(1/detrend_omega_rad, detrend_specter_rad, fig=6)
 
-plt.figure(3)
-plt.plot(res['period']/omega_rad[len(omega_rad)//2:], np.abs(specter_rad[len(specter_rad)//2:]))
-plt.grid()
+# 7
+plot_autocorrelation(autocor, fig=7)
 
-plt.figure(4)
-plt.plot(365.25/omega_rad, np.abs(specter_rad))
-plt.xscale("log")
-plt.grid()
+# 16–19
+plot_precip_raw(dates_precip, precip_1, precip_2=None, precip_3=None, fig=16)
+plot_temp_detrended(dates_precip_tide, (averaged_by_day_precip_2 - sine_temp(k_t)), fig=17,
+                    title="Температура на Камчатке без годового цикла")
+plot_temp_periodogram(res['period']/omega_precip_2, specter_precip_2, fig=18,
+                      title="Периодограмма данных температуры на Камчатке без годового цикла")
+plot_temp_with_fit(dates_precip_tide, averaged_by_day_precip_2, sine_temp(k_t), fig=19,
+                   title="Температура на Камчатке с подобранной годовой гармоникой")
 
-plt.figure(5)
-# plt.plot(1/detrend_omega_rad, np.abs(detrend_specter_rad), label='Прилив солнечного излучения')
-plt.plot(res['period']/omega_tide, np.abs(specter_tide), label='omega из LOD_zonal.dat')
-plt.title('Спектры прилива солнечного излучения и лунного прилива')
-plt.xlabel('Циклов в год')
-plt.xscale('log')
-plt.legend(loc='best')
-plt.grid()
+# 21,22,24,25
+plot_filter_shape(h, fig=21)
+plot_envelope_spectrum(res['period']/envelope_omega, envelope_specter, fig=22)
+plot_envelope_autocorr(autocor_envelope_monthly, fig=24)
+# plot_envelope_power(365.25/np.array(envelope_omega), np.convolve(df_envelope_monthly['Values']-np.mean(df_envelope_monthly['Values']),
+#                                                                  df_envelope_monthly['Values']-np.mean(df_envelope_monthly['Values']),
+#                                                                  'full'), fig=25)
 
-plt.figure(6)
-plt.plot(1/detrend_omega_rad, np.abs(detrend_specter_rad))
-# plt.plot(periods[2000:10000], hurst_poly_val)
-# plt.xscale("log")
-plt.grid()
+# 23: панель индексов
+plot_indices_panel(df_envelope_monthly, df_nao, df_soi, df_amo, df_tide, fig=23)
 
-plt.figure(7)
-plt.plot(autocor, linewidth=0.75)
-plt.xlabel("Временной сдвиг в днях")
-plt.title("Автокорреляционная функция для ПСИ без тренда")
-plt.grid()
+# 26: наложения и гистограммы по LOD
+plot_envelope_over_lod(df_envelope.set_index(pd.to_datetime(df_envelope.index)),
+                       df_max_tide_envelope, df_min_tide_envelope, fig=26)
 
-# plt.figure(8)
-# plt.plot(winter_dates, winter_data, linewidth=0.75)
-# plt.xticks([winter_dates[60*i] for i in range(250)])
-# plt.title('"Зимний" суб ряд, с небольшим разбросом (между 23 сентября и 19 марта)')
-# plt.xlabel('Даты')
-# plt.grid()
+# 27–29: ККФ и спектры
+plot_crosscorr_series(crosscor_tide_envelope, fig=27, title="ККФ: прилив и огибающая")
+plot_ccf_spectrum(res['period']/crosscor_tide_envelope_omega[len(crosscor_tide_envelope_omega)//2:],
+                  crosscor_tide_envelope_specter[len(crosscor_tide_envelope_omega)//2:], fig=28,
+                  title="Спектральная мощность ККФ: прилив vs огибающая", xlabel="Периоды в днях")
+plot_ccf_spectrum_rad(res['period']/crosscor_tide_rad_omega[len(crosscor_tide_rad_omega)//2:],
+                      crosscor_tide_rad_specter[len(crosscor_tide_rad_omega)//2:], fig=29,
+                      title="Спектральная мощность ККФ: прилив vs ПСИ", xlabel="Периоды в годах")
 
-# plt.figure(9)
-# plt.plot(summer_dates, summer_data, linewidth=0.75)
-# plt.xticks([summer_dates[60*i] for i in range(264)])
-# plt.title('"Летний" суб ряд, с большим разбросом (между 19 марта и 23 сентября)')
-# plt.xlabel('Даты')
-# plt.grid()
+# 31: Корреляционная матрица
+plot_correlation_matrix(corr_matrix, labels=['Огибающая','NAO','SOI','AMO','Прилив'], fig=31)
 
-# plt.figure(10)
-# plt.plot(winter_omega[:len(winter_omega)//2], np.abs(winter_specter[:len(winter_omega)//2]), linewidth=0.75)
-# plt.title('Спектр "Зимнего" суб ряда')
-# plt.xlabel('Циклов в год')
-# plt.grid()
+# 32: отфильтрованная температура
+plot_filtered_temp(filtered_temp, fig=32)
 
-# plt.figure(11)
-# plt.plot(summer_omega[:len(summer_omega)//2], np.abs(summer_specter[:len(summer_omega)//2]), linewidth=0.75)
-# plt.title('Спектр "Летнего" суб ряда')
-# plt.xlabel('Циклов в год')
-# plt.grid()
+# 33: спектр ККФ с температурой
+plot_ccf_spectrum_temp(res['period']/crosscor_tide_temp_omega[len(crosscor_tide_temp_omega)//2:],
+                       crosscor_tide_temp_specter[len(crosscor_tide_temp_omega)//2:], fig=33,
+                       title="Спектральная мощность ККФ: прилив vs температура")
 
-plt.figure(12)
-plt.plot(df_envelope.index, np.abs(detrended_rad), label='Модуль от ряда без годового тренда')
-plt.plot(df_envelope.index, abs_envelope_conv, label='Огибающая')
-# plt.plot(dates, lower_envelope, label='Нижняя огибающая')
-plt.legend(loc='best')
-# plt.xticks([dates[90*i] for i in range(345)])
-plt.xlabel("Даты")
-plt.ylabel("Модуль от данных ПСИ без годового тренда")
-plt.title('Данные вместе с огибающими')
-plt.grid()
+# 34: ПСИ без тренда vs LOD экстремумы + гистограммы
+plot_detrended_vs_lod(pd.to_datetime(df_envelope.index),
+                      detrended_rad,
+                      pd.to_datetime(dates[max_tide_indices]), max_tide_rad,
+                      pd.to_datetime(dates[min_tide_indices]), min_tide_rad, fig=34)
 
-# plt.figure(13)
-# plt.plot(dates, np.abs(detrended_rad) - abs_envelope)
-# plt.title('Данные без годового тренда и без верхней огибающей')
-# plt.grid()
+# 35: панель интенсивностей
+plot_intensities_panel(intensities, fig=35)
 
-# plt.figure(14)
-# plt.plot(dates, detrended_rad - lower_envelope)
-# plt.title('Данные без годового тренда и без нижней огибающей')
-# plt.grid()
-
-# plt.figure(15)
-# plt.plot(dates, np.abs(detrended_rad))
-# plt.plot(abs_envelope)
-# plt.grid()
-
-plt.figure(16)
-plt.plot(dates_precip, precip_1)
-# plt.plot(dates_precip, precip_2)
-# plt.plot(dates_precip, precip_3)
-plt.grid()
-
-plt.figure(17)
-# plt.plot(dates_tide[np.where(dates_tide == 1996.84096)[0][0]:np.where(dates_tide == 2024.74812)[0][0]], averaged_by_day_precip_1)
-plt.plot(dates_tide[np.where(dates_tide == 1996.84096)[0][0]:np.where(dates_tide == 2024.74812)[0][0]], averaged_by_day_precip_2 - sine_temp(k_t))
-# plt.plot(dates_tide[np.where(dates_tide == 1996.84096)[0][0]:np.where(dates_tide == 2024.74812)[0][0]], averaged_by_day_precip_3)
-plt.grid()
-
-plt.figure(18)
-plt.plot(res['period']/omega_precip_2, abs(specter_precip_2))
-# plt.plot(t, h_shifted)
-# plt.plot(omega_tide[len(omega_tide)//2:], np.abs(specter_tide)[len(omega_tide)//2:])
-plt.scatter(27.1, 0.1694, marker='^', color='r', zorder=5)
-plt.scatter(29.2043, 0.2096, marker='^', color='orange', zorder=5)
-plt.text(27.1017 - 25.3, 0.1694, "Сидерический период Луны ~27 дней")
-plt.text(29.2043 - 27.3, 0.2096, "Синодический период Луны ~29 дней")
-plt.xscale('log')
-plt.title("Периодограмма данных температуры на Камчатке без годового цикла")
-plt.xlabel('Периоды в днях')
-plt.grid()
-
-plt.figure(19)
-plt.plot(dates_precip_tide, averaged_by_day_precip_2)
-# plt.plot(dates_tide[np.where(dates_tide == 1996.84096)[0][0]:np.where(dates_tide == 2024.74812)[0][0]], pant_smooth_temp_daily)
-plt.plot(dates_precip_tide, sine_temp(k_t))
-plt.title("Ряд температуры на Камчатке с подобранной годовой гармоникой")
-plt.xlabel("Даты")
-plt.ylabel("Температура, °С")
-plt.grid()
-
-# plt.figure(20)
-# plt.plot(omega_filtered_precip[len(omega_filtered_precip)//2:], np.abs(specter_filtered_precip)[len(omega_filtered_precip)//2:])
-# plt.grid()
-
-plt.figure(21)
-plt.plot(h)
-
-plt.figure(22)
-plt.plot(res['period']/envelope_omega, np.abs(envelope_specter))
-# plt.plot(1/omega_rad, np.abs(specter_rad))
-plt.xscale("log")
-
-plt.figure(23)
-plt.subplot(5,1,1)
-plt.plot(df_envelope_monthly.index, np.array(df_envelope_monthly['Values']), label='Огибающая')
-# plt.plot(df_envelope.index, manual_convolution(np.array(df_envelope['Values']), h), label='Отфильтрованная огибающая')
-plt.legend(loc='best')
-plt.title("Графики данных")
-plt.grid()
-plt.subplot(5,1,2)
-plt.plot(df_nao.index, df_nao['nao'], label='NAO')
-plt.legend(loc='best')
-plt.grid()
-plt.subplot(5,1,3)
-plt.plot(df_soi.index, df_soi['soi'], label='SOI')
-plt.legend(loc='best')
-plt.grid()
-plt.subplot(5,1,4)
-plt.plot(df_amo.index, df_amo['amo'], label='AMO')
-plt.legend(loc='best')
-plt.grid()
-# plt.plot(df_max_lod_envelope.index, df_max_lod_envelope['values'], label='lod_max')
-plt.subplot(5,1,5)
-plt.plot(df_tide.index, df_tide['tide'], label='Прилив')
-plt.legend(loc='best')
-plt.xlabel("Даты")
-plt.grid()
-
-plt.figure(24)
-plt.plot(autocor_envelope_monthly)
-plt.grid()
-
-plt.figure(25)
-plt.plot(365.25/omega_envelope, np.abs(specter_envelope))
-plt.xscale('log')
-plt.grid()
-
-plt.figure(26)
-plt.subplot(2,2,1)
-plt.plot(df_envelope.index, df_envelope['Values'], label='Envelope')
-plt.plot(df_max_tide_envelope.index, df_max_tide_envelope['values'], label='lod_max')
-plt.legend(loc='best')
-plt.grid()
-
-plt.subplot(2,2,2)
-plt.plot(df_envelope.index, df_envelope['Values'], label='Envelope')
-plt.plot(df_min_tide_envelope.index, df_min_tide_envelope['values'], label='lod_min')
-plt.legend(loc='best')
-plt.grid()
-
-plt.subplot(2,2,3)
-histplot(df_max_tide_envelope['values'])
-plt.title('Max tide in envelope')
-
-plt.subplot(2,2,4)
-histplot(df_min_tide_envelope['values'])
-plt.title('Min tide in envelope')
-
-plt.figure(27)
-plt.plot(crosscor_tide_envelope)
-plt.grid()
-
-plt.figure(28)
-plt.plot(res['period']/crosscor_tide_envelope_omega[len(crosscor_tide_envelope_omega)//2:], np.abs(crosscor_tide_envelope_specter[len(crosscor_tide_envelope_omega)//2:]))
-# plt.scatter(27.1, 0.256, marker='^', color='r', zorder=5)
-# plt.text(27.1017 - 25.8, 0.256, "Сидерический период Луны ~27 дней")
-plt.title("Спектральная мощность сигнала ККФ (кросс-ковариационной функции) от прилива и огибающей")
-plt.xscale('log')
-plt.xlabel("Периоды в днях")
-plt.grid()
-
-plt.figure(29)
-plt.plot(res['period']/crosscor_tide_rad_omega[len(crosscor_tide_rad_omega)//2:], np.abs(crosscor_tide_rad_specter[len(crosscor_tide_rad_omega)//2:]))
-plt.title("Спектральная мощность сигнала ККФ (кросс-ковариационной функции) от прилива и данных ПСИ")
-plt.xscale('log')
-plt.xlabel("Периоды в годах")
-plt.grid()
-
-# plt.figure(30)
-# plt.plot(1/crosscor_tide_temp_omega[len(crosscor_tide_temp_omega)//2:], np.abs(crosscor_tide_temp_specter[len(crosscor_tide_temp_omega)//2:]))
-# plt.title("Спектральная мощность сигнала ККФ (кросс-ковариационной функции) от прилива и температурой на Камчатке")
-# plt.xscale('log')
-# plt.xlabel("Периоды в годах")
-# plt.grid()
-
-plt.figure(31)
-ax = heatmap(corr_matrix, annot=True, fmt='.4f')
-ax.set_yticklabels(['Огибающая','NAO','SOI','AMO','Прилив'])
-ax.set_xticklabels(['Огибающая','NAO','SOI','AMO','Прилив'])
-plt.title('Корреляционная матрица для индексов, огибающей и прилива')
-
-plt.figure(32)
-plt.plot(filtered_temp)
-plt.plot()
-
-plt.figure(33)
-plt.plot(res['period']/crosscor_tide_temp_omega[len(crosscor_tide_temp_omega)//2:], np.abs(crosscor_tide_temp_specter[len(crosscor_tide_temp_omega)//2:]))
-plt.xscale('log')
-plt.grid()
-
-plt.figure(34)
-plt.subplot(2,2,1)
-plt.plot(df_envelope.index, detrended_rad, label='Envelope')
-plt.plot(df_max_tide_envelope.index, max_tide_rad, label='lod_max')
-plt.legend(loc='best')
-plt.grid()
-
-plt.subplot(2,2,2)
-plt.plot(df_envelope.index, detrended_rad, label='Envelope')
-plt.plot(df_min_tide_envelope.index, min_tide_rad, label='lod_min')
-plt.legend(loc='best')
-plt.grid()
-
-plt.subplot(2,2,3)
-histplot(max_tide_rad)
-plt.title('Max tide in envelope')
-
-plt.subplot(2,2,4)
-histplot(min_tide_rad)
-plt.title('Min tide in envelope')
-
-plt.figure(35)
-plt.subplot(3,2,1)
-plt.plot(intensities[0], intensities[3])
-plt.title('NAO\n\nСлучайная доля интенсивности')
-plt.xticks([])
-
-plt.subplot(3,2,3)
-plt.plot(intensities[0], intensities[4])
-plt.title('Доля самовозбуждения')
-plt.xticks([])
-
-plt.subplot(3,2,5)
-plt.plot(intensities[0], intensities[5])
-plt.title('Доля действия процесса огибающей на NAO')
-
-plt.subplot(3,2,2)
-plt.plot(intensities[0], intensities[6])
-plt.title('Огибающая\n\nСлучайная доля интенсивности')
-plt.xticks([])
-
-plt.subplot(3,2,4)
-plt.plot(intensities[0], intensities[7])
-plt.title('Доля самовозбуждения')
-plt.xticks([])
-
-plt.subplot(3,2,6)
-plt.plot(intensities[0], intensities[8])
-plt.title('Доля действия процесса NAO на огибающую')
-
-plt.show()
+# финальный вывод
+show_all()
 
